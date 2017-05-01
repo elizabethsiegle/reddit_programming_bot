@@ -2,6 +2,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ExtendedDefaultRules #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE PatternGuards #-}
@@ -14,19 +15,23 @@ import Data.ByteString.Lazy.Char8
 import Data.ByteString.Lazy.Char8()
 import GHC.Types (IO (..))
 import Control.Monad
+import Control.Monad.IO.Class
 import Data.Char(toUpper)
 import Data.Maybe
 import Data.Monoid ((<>))
 import Data.Bool
 import Prelude
-import Network.HTTP.Client.TLS (getGlobalManager)
+import Network.HTTP.Client.TLS (getGlobalManager, tlsManagerSettings)
 import Network.HTTP.Client
 import Network.Linklater
 import Control.Monad.Trans.Maybe
 import Data.Aeson
 import Servant.Common.Req
+import System.Random
+import Control.Monad.Random hiding (Random)
 
 import qualified Data.Text as T
+import qualified Data.Text.IO as T 
 import           Control.Monad.IO.Class (liftIO)
 import           Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
 import           Data.Aeson (encode)
@@ -38,18 +43,18 @@ import Network.Wreq
 
 import Network.HTTP.Types.Status (statusCode)
 import Network.HTTP.Base
-import Servant.Client (ClientEnv(ClientEnv), runClientM)
-import Web.Yahoo.Finance.YQL
---       (StockSymbol(StockSymbol), YQLQuery(YQLQuery), getQuotes,
---        yahooFinanceJsonBaseUrl)
-----import Network.Yahoo.Finance
 
 import Reddit
 import Reddit.Types.Post
+import Reddit.Types.SearchOptions (Order (..))
+--import Web.Google.Translate
 import Control.Monad
 import Control.Monad.IO.Class
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
+
+randIntHelper:: Int -> Int
+randIntHelper x = 2 * x
 
 readSlackFile :: FilePath -> IO Text
 readSlackFile filename =
@@ -67,25 +72,32 @@ parseText text = case T.strip text of
 liftMaybe :: Maybe a -> IO a
 liftMaybe = maybe mzero return
 
-messageOfCommandStock :: Command -> IO Network.Linklater.Message
-messageOfCommandStock (Command "stock" user channel (Just text)) = do
-  manager <- getGlobalManager
-  query <- liftMaybe (parseText text)
-  res <- runClientM (getQuotes (YQLQuery [StockSymbol query])) (ClientEnv manager yahooFinanceJsonBaseUrl)
-  case res of
-    Right responseQuotes ->
-      return (messageOf [FormatAt user, FormatString (T.pack(show responseQuotes))])
-      where 
-        messageOf =
-          FormattedMessage(EmojiIcon "gift") "stockbot" channel
+printPost :: Post -> T.Text
+printPost post = do
+  title post <> "\n" <> (T.pack . show . created $ post) <> "\n" <> "http://reddit.com"<> permalink post <> "\n" <> "Score: " <> (T.pack . show . score $ post)
 
-stockify :: Maybe Command -> IO Text
-stockify Nothing =
+findQPosts:: Text -> RedditT IO PostListing
+findQPosts c = search (Just $ R "programming") (Options Nothing (Just 0)) Hot c
+
+messageOfCommandReddit :: Command -> IO Network.Linklater.Message
+messageOfCommandReddit (Command "reddit" user channel (Just text)) = do
+  query <- liftMaybe (parseText text)
+  posts <- runRedditAnon (findQPosts query)
+  --num <- randomIO :: IO Int
+  case posts of
+    Right posts' ->
+       return (messageOf [FormatAt user, FormatString (T.intercalate "\n\n". Prelude.map printPost $ contents posts')]) where
+        messageOf =
+          FormattedMessage(EmojiIcon "gift") "redditbot" channel
+          
+
+redditify :: Maybe Command -> IO Text
+redditify Nothing =
   return "Unrecognized Slack request!"
 
-stockify (Just command) = do
+redditify(Just command) = do
   Prelude.putStrLn ("+ Incoming command: " <> show command)
-  message <- (messageOfCommandStock) command
+  message <- (messageOfCommandReddit) command
   config <- configIO
   --putStrLn ("+ Outgoing message: " <> show (message))
   case (debug, message) of
@@ -98,15 +110,13 @@ stockify (Just command) = do
       return ""
   where
     debug = False
---messageOfCommandHackerNews :: Command -> IO Message
+
+--messageOfCommandHackerNews :: Command -> IO Network.Linklater.Message
 --messageOfCommandHackerNews (Command "hackernews" user channel (Just text)) = do
--- mgr <- newManager tlsManagerSettings
+--  mgr <- newManager tlsManagerSettings
 --  case mgr of
---    --Left servantError -> do
---    --  print (servantError)
---    --  return ("<unexpected error>")::IO Message
---    Right getTopStories mgr ->
---      return (messageOf [FormatAt user, FormatString (T.pack(show getTopStories mgr))])
+--    Right (getTopStories mgr) ->
+--    return (messageOf [FormatAt user, FormatString (getTopStories mgr)])
 --      where 
 --        messageOf =
 --          FormattedMessage(EmojiIcon "gift") "hackernews" channel
@@ -131,10 +141,9 @@ stockify (Just command) = do
 --  where
 --    debug = False
 
-
 main :: IO ()
 main = do
   Prelude.putStrLn ("+ Listening on port " <> show port)
-  run port (slashSimple stockify)
+  run port (slashSimple redditify)
     where
       port = 3000
